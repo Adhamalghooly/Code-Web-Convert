@@ -4905,7 +4905,7 @@ function _createPrintProxy() {
         print() {
             setTimeout(() => {
                 _doPrint('تقرير المشاريع');
-                setTimeout(() => { document.getElementById('__print_overlay__')?.remove(); document.getElementById('__print_style__')?.remove(); }, 1500);
+                // لا نزيل الـ overlay تلقائياً — المستخدم يغلقها بزر ✕ بعد انتهاء الطباعة
             }, 350);
         },
         closed: false
@@ -4923,15 +4923,22 @@ function _doPrint(jobName) {
     }
 }
 
-// ── override window.open: توجيه نوافذ الطباعة للـ proxy الداخلي ──
+// ── override window.open + window.print: توجيه الطباعة في APK بدون فتح متصفح ──
 (function() {
+    const _isAPK = () => !!(window.AndroidPrint && window.AndroidPrint.isAvailable && window.AndroidPrint.isAvailable());
     const _orig = window.open.bind(window);
     window.open = function(url, target, features) {
-        if (url === '' || url === undefined || url === null) {
+        if (url === '' || url === undefined || url === null || url === 'about:blank') {
+            if (_isAPK()) return _createPrintProxy();
             try { const win = _orig(url, target, features); if (win && !win.closed) return win; } catch(e) {}
             return _createPrintProxy();
         }
         return _orig(url, target, features);
+    };
+    const _origPrint = typeof window.print === 'function' ? window.print.bind(window) : function(){};
+    window.print = function() {
+        if (_isAPK()) { window.AndroidPrint.print('تقرير'); }
+        else { _origPrint(); }
     };
 })();
 
