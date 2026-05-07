@@ -2,23 +2,24 @@
 
 // ── تنزيل Excel: يعمل في المتصفح وفي Android WebView (APK) ──
 function saveExcelFile(wb, filename) {
-    const mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-
-    // الطريقة 1: Web Share API — الأفضل على الجوال وأندرويد APK
+    // الطريقة 1: base64 data URI — تعمل في Android WebView
     try {
-        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-        const blob = new Blob([wbout], { type: mimeType });
-        const file = new File([blob], filename, { type: mimeType });
-        if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-            navigator.share({ files: [file], title: filename }).catch(() => {});
-            return;
-        }
-    } catch (e0) {}
+        const b64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+        const dataUri = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,' + b64;
+        const a = document.createElement('a');
+        a.href = dataUri;
+        a.download = filename;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { try { document.body.removeChild(a); } catch(e){} }, 300);
+        return;
+    } catch (e1) {}
 
     // الطريقة 2: Blob + createObjectURL (متصفح سطح المكتب)
     try {
         const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-        const blob = new Blob([wbout], { type: mimeType });
+        const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -27,65 +28,21 @@ function saveExcelFile(wb, filename) {
         document.body.appendChild(a);
         a.click();
         setTimeout(() => {
-            try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch(e) {}
-        }, 500);
-        return;
-    } catch (e1) {}
-
-    // الطريقة 3: base64 data URI — بديل Android WebView
-    try {
-        const b64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
-        const dataUri = 'data:' + mimeType + ';base64,' + b64;
-        const a = document.createElement('a');
-        a.href = dataUri;
-        a.download = filename;
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => { try { document.body.removeChild(a); } catch(e) {} }, 500);
+            try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch(e){}
+        }, 300);
         return;
     } catch (e2) {}
 
-    // الطريقة 4: Fallback نهائي
+    // الطريقة 3: Fallback نهائي
     try { XLSX.writeFile(wb, filename); } catch(e3) {}
-}
-
-// ── تنزيل PDF من محتوى overlay الطباعة (بديل للـ APK) ──
-function _downloadOverlayAsPDF() {
-    const contentEl = document.getElementById('__print_content__');
-    if (!contentEl) return;
-
-    if (typeof window.jspdf === 'undefined' && typeof window.jsPDF === 'undefined') {
-        alert('مكتبة PDF غير متاحة. يرجى المحاولة مرة أخرى.');
-        return;
-    }
-
-    const jsPDFLib = window.jspdf?.jsPDF || window.jsPDF;
-    const doc = new jsPDFLib({ orientation: 'portrait', unit: 'pt', format: 'a4' });
-    const pageWidth = doc.internal.pageSize.getWidth();
-
-    doc.html(contentEl, {
-        callback: function(d) {
-            const ts = new Date().toLocaleDateString('en-GB').replace(/\//g, '-');
-            d.save('تقرير-' + ts + '.pdf');
-            document.getElementById('__print_overlay__')?.remove();
-            document.getElementById('__print_style__')?.remove();
-        },
-        x: 10,
-        y: 10,
-        width: pageWidth - 20,
-        windowWidth: contentEl.scrollWidth || 794,
-        autoPaging: 'text'
-    });
 }
 
 // ── طباعة بـ overlay داخل الصفحة — تعمل في Android WebView (APK) وفي المتصفح ──
 // proxy يُحاكي واجهة window.open لكنه يعرض المحتوى في overlay داخل الصفحة
 function _createPrintProxy() {
     let _html = '';
-    const proxy = {
+    return {
         document: {
-            open() {},
             write(html) { _html += html; },
             close() {
                 // احذف overlay قديم إن وُجد
@@ -99,11 +56,12 @@ function _createPrintProxy() {
                     'direction:rtl', 'font-family:Arial,sans-serif'
                 ].join(';');
 
+                // زر إغلاق (يختفي عند الطباعة)
                 overlay.innerHTML = `
                     <div id="__print_bar__" style="
                         position:sticky;top:0;z-index:10;
                         background:#1e3a8a;color:#fff;
-                        padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+                        padding:10px 16px;display:flex;gap:10px;align-items:center;
                         font-family:Arial,sans-serif;
                     ">
                         <button onclick="window.print()" style="
@@ -111,25 +69,22 @@ function _createPrintProxy() {
                             padding:8px 20px;border-radius:6px;font-weight:bold;
                             font-size:14px;cursor:pointer;
                         ">🖨️ طباعة</button>
-                        <button onclick="_downloadOverlayAsPDF()" style="
-                            background:#10b981;color:#fff;border:none;
-                            padding:8px 20px;border-radius:6px;font-weight:bold;
-                            font-size:14px;cursor:pointer;
-                        ">📄 تحميل PDF</button>
-                        <button onclick="document.getElementById('__print_overlay__')?.remove();document.getElementById('__print_style__')?.remove();" style="
+                        <button onclick="document.getElementById('__print_overlay__')?.remove()" style="
                             background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);
                             padding:8px 16px;border-radius:6px;font-size:14px;cursor:pointer;
                         ">✕ إغلاق</button>
-                        <span style="font-size:12px;opacity:.8;">معاينة الطباعة — على الجوال اضغط «تحميل PDF»</span>
+                        <span style="font-size:13px;opacity:.85;">معاينة الطباعة</span>
                     </div>
                     <div id="__print_content__"></div>
                 `;
 
                 document.body.appendChild(overlay);
 
+                // أدخِل HTML للمحتوى
                 const contentDiv = overlay.querySelector('#__print_content__');
                 contentDiv.innerHTML = _html;
 
+                // أضف أنماط طباعة: أخفِ كل شيء إلا الـ overlay
                 let styleEl = document.getElementById('__print_style__');
                 if (!styleEl) {
                     styleEl = document.createElement('style');
@@ -149,25 +104,23 @@ function _createPrintProxy() {
         print() {
             setTimeout(() => {
                 window.print();
+                // بعد الطباعة: احذف الـ overlay وأنماط الطباعة تلقائياً
                 setTimeout(() => {
                     document.getElementById('__print_overlay__')?.remove();
                     document.getElementById('__print_style__')?.remove();
                 }, 1000);
             }, 350);
-        },
-        closed: false,
-        location: { href: '' }
+        }
     };
-    return proxy;
 }
 
-// استبدال window.open: استخدم proxy الطباعة الداخلي لجميع نوافذ الطباعة (APK + جوال)
+// استبدال window.open: دائماً استخدم proxy الطباعة الداخلي لنوافذ الطباعة
 (function() {
     const _orig = window.open.bind(window);
     window.open = function(url, target, features) {
-        // أي window.open بـ URL فارغ = نافذة طباعة داخلية
-        if (url === '' || url === undefined || url === null) {
-            // حاول فتح نافذة حقيقية أولاً (متصفح سطح المكتب فقط)
+        // نوافذ الطباعة الداخلية فقط (بدون URL)
+        if (url === '' && target === '_blank') {
+            // حاول فتح نافذة حقيقية أولاً (متصفح سطح المكتب)
             try {
                 const win = _orig(url, target, features);
                 if (win && !win.closed) return win;

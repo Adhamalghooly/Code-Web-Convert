@@ -4889,7 +4889,7 @@ function _createPrintProxy() {
                 overlay.style.cssText = 'position:fixed;inset:0;z-index:999999;background:#fff;overflow:auto;direction:rtl;font-family:Arial,sans-serif;';
                 overlay.innerHTML = `
                     <div id="__print_bar__" style="position:sticky;top:0;z-index:10;background:#1e3a8a;color:#fff;padding:10px 16px;display:flex;gap:10px;align-items:center;font-family:Arial,sans-serif;">
-                        <button onclick="window.print()" style="background:#fff;color:#1e3a8a;border:none;padding:8px 20px;border-radius:6px;font-weight:bold;font-size:14px;cursor:pointer;">🖨️ طباعة</button>
+                        <button onclick="_doPrint('تقرير')" style="background:#fff;color:#1e3a8a;border:none;padding:8px 20px;border-radius:6px;font-weight:bold;font-size:14px;cursor:pointer;">🖨️ طباعة</button>
                         <button onclick="document.getElementById('__print_overlay__')?.remove();document.getElementById('__print_style__')?.remove();" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);padding:8px 16px;border-radius:6px;font-size:14px;cursor:pointer;">✕ إغلاق</button>
                         <span style="font-size:13px;opacity:.85;">معاينة الطباعة</span>
                     </div>
@@ -4904,10 +4904,11 @@ function _createPrintProxy() {
         focus() {},
         print() {
             setTimeout(() => {
-                window.print();
-                setTimeout(() => { document.getElementById('__print_overlay__')?.remove(); document.getElementById('__print_style__')?.remove(); }, 1000);
+                _doPrint('تقرير المشاريع');
+                setTimeout(() => { document.getElementById('__print_overlay__')?.remove(); document.getElementById('__print_style__')?.remove(); }, 1500);
             }, 350);
-        }
+        },
+        closed: false
     };
 }
 
@@ -4937,10 +4938,32 @@ function _doPrint(jobName) {
 // ── override XLSX.writeFile: استخدام base64 data URI بدلاً من createObjectURL ──
 (function patchXLSX() {
     function _xlsxWrite(wb, filename, opts) {
+        const ext = filename.split('.').pop().toLowerCase();
+        const bookType = (opts && opts.bookType) || (ext === 'csv' ? 'csv' : 'xlsx');
+        const mime = ext === 'csv' ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+        // Method 1: AndroidDownload bridge — APK (الأفضل على أندرويد)
         try {
-            const ext = filename.split('.').pop().toLowerCase();
-            const bookType = (opts && opts.bookType) || (ext === 'csv' ? 'csv' : 'xlsx');
-            const mime = ext === 'csv' ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            if (window.AndroidDownload && window.AndroidDownload.isAvailable && window.AndroidDownload.isAvailable()) {
+                const b64 = XLSX.write(wb, Object.assign({}, opts || {}, { bookType, type: 'base64' }));
+                window.AndroidDownload.saveFile(b64, filename, mime);
+                return;
+            }
+        } catch(e0) {}
+
+        // Method 2: Web Share API — modern Android browsers
+        try {
+            const arr = XLSX.write(wb, Object.assign({}, opts || {}, { bookType, type: 'array' }));
+            const blob = new Blob([arr], { type: mime });
+            const file = new File([blob], filename, { type: mime });
+            if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+                navigator.share({ files: [file], title: filename }).catch(() => {});
+                return;
+            }
+        } catch(e1) {}
+
+        // Method 3: base64 data URI anchor click
+        try {
             const b64 = XLSX.write(wb, Object.assign({}, opts || {}, { bookType, type: 'base64' }));
             const a = document.createElement('a');
             a.href = 'data:' + mime + ';base64,' + b64;
@@ -4948,20 +4971,20 @@ function _doPrint(jobName) {
             a.style.display = 'none';
             document.body.appendChild(a);
             a.click();
-            setTimeout(() => { try { document.body.removeChild(a); } catch(e){} }, 300);
-        } catch(e) {
-            try {
-                const ext = filename.split('.').pop().toLowerCase();
-                const bookType = (opts && opts.bookType) || (ext === 'csv' ? 'csv' : 'xlsx');
-                const arr = XLSX.write(wb, Object.assign({}, opts || {}, { bookType, type: 'array' }));
-                const blob = new Blob([arr], { type: 'application/octet-stream' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url; a.download = filename; a.style.display = 'none';
-                document.body.appendChild(a); a.click();
-                setTimeout(() => { try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch(e){} }, 300);
-            } catch(e2) {}
-        }
+            setTimeout(() => { try { document.body.removeChild(a); } catch(e){} }, 500);
+            return;
+        } catch(e2) {}
+
+        // Method 4: Blob URL
+        try {
+            const arr = XLSX.write(wb, Object.assign({}, opts || {}, { bookType, type: 'array' }));
+            const blob = new Blob([arr], { type: mime });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = filename; a.style.display = 'none';
+            document.body.appendChild(a); a.click();
+            setTimeout(() => { try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch(e){} }, 500);
+        } catch(e3) {}
     }
     if (typeof XLSX !== 'undefined') {
         XLSX.writeFile = _xlsxWrite;
