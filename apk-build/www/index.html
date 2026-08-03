@@ -9898,6 +9898,7 @@ async function loadAppData(key) {
 
 async function saveDatabase() {
     const dbToSave = __fullProjectsDatabase || projectsDatabase;
+    if (!dbToSave.metadata) dbToSave.metadata = {};
     dbToSave.metadata.lastUpdate = new Date().toISOString();
     try {
         await saveToIndexedDB(dbToSave);
@@ -10333,10 +10334,20 @@ async function importBackup(file) {
                             window.mrSaveProjNotes(data.projNotes);
                     }
 
-                    await saveDatabase();
+                    // تأكد من أن SQLite جاهز قبل الحفظ
+                    if (!sqliteReady) {
+                        throw new Error('قاعدة البيانات غير مهيأة — أعد تشغيل التطبيق وحاول مجدداً');
+                    }
+
+                    const saved = await saveDatabase();
+                    if (!saved) {
+                        throw new Error('فشل حفظ البيانات إلى قاعدة البيانات — تحقق من مساحة التخزين');
+                    }
                     applyBranchFilterToProjectsDatabase();
                     const ver = data.version || '2.x';
-                    showNotification(`✅ تم استيراد النسخة الاحتياطية بنجاح (إصدار ${ver})`, 'success');
+                    const count = Array.isArray(__fullProjectsDatabase && __fullProjectsDatabase.timeline)
+                        ? __fullProjectsDatabase.timeline.length : 0;
+                    showNotification(`✅ تم استيراد النسخة الاحتياطية وحفظها في قاعدة البيانات بنجاح (${count} سجل زمني — إصدار ${ver})`, 'success');
                 } else {
                     reject(new Error('ملف غير صالح — يجب أن يحتوي على projectsDatabase'));
                 }
@@ -10467,7 +10478,15 @@ async function importBackupFiles(files) {
             window.mrSaveProjNotes(data.projNotes);
     }
 
-    await saveDatabase();
+    // تأكد من أن SQLite جاهز قبل الحفظ
+    if (!sqliteReady) {
+        throw new Error('قاعدة البيانات غير مهيأة — أعد تشغيل التطبيق وحاول مجدداً');
+    }
+
+    const saved = await saveDatabase();
+    if (!saved) {
+        throw new Error('فشل حفظ البيانات إلى قاعدة البيانات — تحقق من مساحة التخزين');
+    }
     applyBranchFilterToProjectsDatabase();
 }
 
