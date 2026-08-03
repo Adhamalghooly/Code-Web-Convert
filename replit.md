@@ -73,31 +73,66 @@ Use `restartWorkflow({ workflowName: "artifacts/project-management: web" })` via
 
 نسخة Capacitor 6 + SQLite من التطبيق كـAPK أندرويد.
 
-### المشكلة المحلولة
-- ملف `android/app/src/main/assets/capacitor.plugins.json` كان مفقوداً لأن `cap sync android` لم تُنفَّذ.
-- `@capacitor/cli` محظور بسبب تبعية `tar@6.2.1` (CVE).
+### المشاكل المحلولة (آخر جلسة)
+- **توقف الاستيراد عند قاعدة بيانات كبيرة (23+ ملف):** كانت `importBackupFiles` تقرأ كل الملفات في الذاكرة دفعةً واحدة → نفاد RAM. الحل: معالجة الملفات تباعًا مع تحرير ذاكرة كل ملف قبل قراءة التالي.
+- **إشعار الترحيل لا يظهر:** كان `showNotification('تم تحميل النظام...')` يُلغي إشعار الترحيل مباشرةً بعده. الحل: حفظ إشعار الترحيل في `_pendingMigrationNotification` وعرضه بعد اكتمال التهيئة.
+- **Race condition في `initIndexedDB`:** أُضيف قفل mutex (`_dbInitPromise`) يمنع فتح الاتصال مرتين متزامنتين.
+- **`node_modules` و`capacitor-cordova-android-plugins` مفقودان:** يُعاد إنشاؤهما أثناء البناء (انظر الخطوات أدناه).
 
 ### كيفية بناء APK جديد
 ```bash
 # 1. تأكد من Android SDK في:
 #    /home/runner/workspace/android-sdk  (يُنشأ مرة واحدة لكل بيئة)
 
-# 2. أنشئ ملفات cap sync يدوياً:
+# 2. تثبيت التبعيات (إن لم تكن موجودة):
+cd apk-build && npm install --legacy-peer-deps && cd ..
+
+# 3. أنشئ capacitor-cordova-android-plugins يدوياً (مُستبعَد من git):
+mkdir -p apk-build/android/capacitor-cordova-android-plugins/src/main
+# -- cordova.variables.gradle --
+cat > apk-build/android/capacitor-cordova-android-plugins/cordova.variables.gradle << 'EOF'
+ext {
+    minSdkVersion = 22; compileSdkVersion = 34; targetSdkVersion = 34
+    androidxActivityVersion = '1.7.0'; androidxAppCompatVersion = '1.6.1'
+    androidxCoreVersion = '1.10.0'; androidxFragmentVersion = '1.5.7'
+}
+EOF
+# -- build.gradle --
+cat > apk-build/android/capacitor-cordova-android-plugins/build.gradle << 'EOF'
+apply plugin: 'com.android.library'
+android {
+    namespace "capacitor.cordova.android.plugins"
+    compileSdkVersion 34
+    defaultConfig { minSdkVersion 22; targetSdkVersion 34 }
+}
+dependencies {}
+EOF
+echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android"></manifest>' \
+  > apk-build/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml
+
+# 4. أنشئ ملفات assets:
 mkdir -p apk-build/android/app/src/main/assets/public
 echo '[{"pkg":"@capacitor-community/sqlite","classpath":"com.getcapacitor.community.database.sqlite.CapacitorSQLitePlugin"}]' \
   > apk-build/android/app/src/main/assets/capacitor.plugins.json
 cp apk-build/capacitor.config.json apk-build/android/app/src/main/assets/capacitor.config.json
 cp -r apk-build/www/. apk-build/android/app/src/main/assets/public/
 
-# 3. بناء الـAPK:
+# 5. بناء الـAPK:
 export ANDROID_HOME=/home/runner/workspace/android-sdk
 cd apk-build/android && ./gradlew assembleDebug --no-daemon
 
-# 4. المخرج:
-# apk-build/android/app/build/outputs/apk/debug/app-debug.apk
+# 6. نسخ المخرج:
+cp apk-build/android/app/build/outputs/apk/debug/app-debug.apk project-management-apk-sqlite.apk
 ```
 
 ### ملاحظات هامة
 - `@capacitor/cli` **محذوف** من devDependencies عمداً (CVE في tar@6.2.1).
-- `cordova.variables.gradle` يجب أن يكون موجوداً في `android/capacitor-cordova-android-plugins/`.
+- `capacitor-cordova-android-plugins/` و`node_modules/` مُستبعَدان من git — يُعادان إنشاؤهما عند كل بناء.
 - الـAPK المُسلَّم: `project-management-apk-sqlite.apk` في جذر المشروع.
+
+### اختبار بعد التثبيت
+1. **لا تمسح** بيانات التطبيق القديم قبل أول تشغيل (الترحيل يحتاج IndexedDB القديم).
+2. عند أول فتح: يجب ظهور إشعار **"✅ تم ترحيل بياناتك..."**.
+3. بعد 7 ثوانٍ يظهر **"تم تحميل النظام بنجاح"** — هذا طبيعي.
+4. استيراد نسخة احتياطية (23 ملف أو أكثر) يجب أن **لا** يُوقف التطبيق.
+5. للتشخيص المتقدم: `chrome://inspect#devices` → Console.

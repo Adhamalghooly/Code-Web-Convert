@@ -9634,6 +9634,8 @@ const StatsCenter = {
 const SQLITE_DB_NAME = 'projectsanalysisdb'; // بدون مسافات/أحرف كبيرة — متطلب الإضافة
 let sqliteReady = false;
 let _sqlitePlugin = null;
+let _dbInitPromise = null;           // قفل (mutex) يمنع تشغيل initIndexedDB مرتين في آنٍ واحد
+let _pendingMigrationNotification = null; // يخزّن إشعار الترحيل ريثما تكتمل التهيئة الكاملة
 
 function _getSQLitePlugin() {
     if (_sqlitePlugin) return _sqlitePlugin;
@@ -9713,6 +9715,14 @@ CREATE INDEX IF NOT EXISTS idx_selstats_sup ON selection_stats(supervisor);
 `;
 
 async function initIndexedDB() {
+    // قفل mutex: إن كانت التهيئة جارية بالفعل فأعد نفس الـPromise بدلاً من فتح اتصال ثانٍ
+    // (يمنع race condition عندما تستدعي وحداتٌ متعددة هذه الدالة تزامنياً)
+    if (_dbInitPromise) return _dbInitPromise;
+    _dbInitPromise = _initIndexedDBImpl();
+    return _dbInitPromise;
+}
+
+async function _initIndexedDBImpl() {
     // يفتح اتصال SQLite (يحل محل IndexedDB بالكامل)، ينشئ الجداول عند أول تشغيل،
     // ثم يشغّل الترحيل التلقائي الشامل من IndexedDB القديم (كل المخازن، وليس فقط
     // ما كان يغطيه زر النسخ الاحتياطي القديم).
@@ -9853,12 +9863,14 @@ async function _migrateFromIndexedDBIfNeeded() {
 
         await _sqliteRun("INSERT OR REPLACE INTO app_data (key, value) VALUES (?, ?)", ['_migratedFromIndexedDB_v1', JSON.stringify({ done: true, at: new Date().toISOString(), recordsMigrated: migratedCount })]);
         console.log(`✅ تم ترحيل ${migratedCount} سجل من IndexedDB إلى SQLite بنجاح`);
-        try { if (typeof showNotification === 'function') showNotification(`✅ تم ترحيل بياناتك (${migratedCount} عنصر) إلى نظام التخزين الجديد بنجاح`, 'success'); } catch (e) {}
+        // لا نعرض الإشعار هنا مباشرةً لأن startApp() ستُعيّن إشعار "تم تحميل النظام" بعده فوراً —
+        // نحفظه في متغيّر مؤقت ليُعرض بعد اكتمال التهيئة الكاملة.
+        _pendingMigrationNotification = { msg: `✅ تم ترحيل بياناتك (${migratedCount} عنصر) إلى نظام التخزين الجديد بنجاح`, type: 'success' };
     } catch (e) {
         console.error('خطأ أثناء ترحيل البيانات من IndexedDB إلى SQLite:', e);
         // عمداً لا نُعلّم الترحيل كمكتمل هنا — سيُعاد تلقائياً عند إعادة فتح التطبيق،
         // وIndexedDB القديم يبقى سليماً بدون أي تعديل، فلا خطر على البيانات الأصلية.
-        try { if (typeof showNotification === 'function') showNotification('⚠️ حدث خطأ أثناء ترحيل بياناتك القديمة — سيُعاد المحاولة تلقائياً عند إعادة فتح التطبيق. بياناتك القديمة ما زالت محفوظة بأمان في مكانها.', 'warning'); } catch (e2) {}
+        _pendingMigrationNotification = { msg: '⚠️ حدث خطأ أثناء ترحيل بياناتك القديمة — سيُعاد المحاولة تلقائياً عند إعادة فتح التطبيق. بياناتك القديمة ما زالت محفوظة بأمان في مكانها.', type: 'warning' };
     }
 }
 
@@ -10375,6 +10387,10 @@ function _readFileAsJSON(file) {
 
 // يستورد نسخة احتياطية سواء كانت ملفاً واحداً قديماً شاملاً، أو عدة ملفات حديثة
 // (ملف أساسي backup-core + أجزاء الخط الزمني/المواقع) مُختارة معاً.
+//
+// ملاحظة أداء: الملفات تُقرأ وتُعالج واحداً تلو الآخر — كل ملف يُفرغ من الذاكرة
+// بعد استخراج ما يلزم منه، قبل قراءة التالي. هذا يمنع نفاد RAM عند استيراد
+// نسخ احتياطية كبيرة تتجاوز 20 ملفاً.
 async function importBackupFiles(files) {
     if (!files || files.length === 0) return;
 
@@ -10386,35 +10402,67 @@ async function importBackupFiles(files) {
         }
     }
 
-    const parsed = [];
+    // مرور واحد على الملفات: نقرأ كل ملف، نستخرج ما يلزم، ثم نتركه للـGC قبل قراءة التالي.
+    // هذا يمنع تراكم جميع الملفات في الذاكرة في آنٍ واحد.
+    let coreData = null;
+    let legacyFullFile = null;
+    // أجزاء الخط الزمني: نحتفظ فقط بـ{idx, entries} وليس بكائن JSON الكامل
+    const timelineChunks = []; // [{idx: number, entries: Array}]
+    // بيانات المواقع: ندمجها مباشرةً في كائن واحد بدل تخزين أجزاء منفصلة
+    const mergedGeoEntries = {};
+
     for (const f of files) {
-        try { parsed.push({ file: f, data: await _readFileAsJSON(f) }); }
+        let data;
+        try { data = await _readFileAsJSON(f); }
         catch(err) { throw err; }
+        if (!data) continue;
+
+        // تنسيق قديم شامل في ملف واحد
+        if (data.projectsDatabase && !data.type) {
+            legacyFullFile = f;
+            break;
+        }
+
+        if (data.type === 'backup-core') {
+            coreData = data;
+            // لا نُفرغ coreData — نحتاجه لاحقاً، لكنه ملف واحد صغير نسبياً
+        } else if (data.type === 'backup-timeline-chunk') {
+            // نستخرج entries فوراً ونتخلص من باقي الـJSON لتحرير الذاكرة
+            timelineChunks.push({
+                idx: data.partIndex || 0,
+                entries: Array.isArray(data.entries) ? data.entries : []
+            });
+            data = null; // إشارة للـGC
+        } else if (data.type === 'backup-geo-chunk') {
+            // ندمج مباشرةً في الكائن المشترك بدل تخزين الجزء كاملاً
+            const entries = data.entries || {};
+            Object.assign(mergedGeoEntries, entries);
+            data = null; // إشارة للـGC
+        }
+        // أي نوع آخر: تجاهل
     }
 
-    const legacyFull = parsed.find(p => p.data && p.data.projectsDatabase && !p.data.type);
-    if (legacyFull) {
-        return importBackup(legacyFull.file);
+    if (legacyFullFile) {
+        return importBackup(legacyFullFile);
     }
 
-    const core = parsed.find(p => p.data && p.data.type === 'backup-core');
-    const timelineParts = parsed.filter(p => p.data && p.data.type === 'backup-timeline-chunk')
-        .sort((a, b) => (a.data.partIndex||0) - (b.data.partIndex||0));
-    const geoParts = parsed.filter(p => p.data && p.data.type === 'backup-geo-chunk')
-        .sort((a, b) => (a.data.partIndex||0) - (b.data.partIndex||0));
-
-    if (!core) {
+    if (!coreData) {
         throw new Error('لم يتم اختيار ملف "الأساسي" (backup_core) — يلزم اختياره مع باقي الأجزاء لاستكمال الاستيراد');
     }
-    const data = core.data;
+
+    // رتّب الأجزاء حسب partIndex واجمعها في مصفوفة timeline واحدة
+    timelineChunks.sort((a, b) => a.idx - b.idx);
+    const assembledTimeline = [];
+    for (const chunk of timelineChunks) {
+        for (const entry of chunk.entries) assembledTimeline.push(entry);
+        chunk.entries = null; // تحرير الذاكرة بعد الدمج
+    }
+
+    const data = coreData;
 
     __fullProjectsDatabase = __fullProjectsDatabase || { metadata: {}, timeline: [] };
     __fullProjectsDatabase.metadata = data.projectsMetadata || __fullProjectsDatabase.metadata || {};
-    __fullProjectsDatabase.timeline = [];
-    for (const part of timelineParts) {
-        const entries = Array.isArray(part.data.entries) ? part.data.entries : [];
-        __fullProjectsDatabase.timeline.push(...entries);
-    }
+    __fullProjectsDatabase.timeline = assembledTimeline;
     projectsDatabase = __fullProjectsDatabase;
 
     actualStatusDatabase = data.actualStatusDatabase || {};
@@ -10451,14 +10499,13 @@ async function importBackupFiles(files) {
             timelinePlanningDatabase = data.timelinePlanningDatabase;
     }
 
-    if (geoParts.length > 0 && typeof geoDatabase !== 'undefined') {
-        for (const part of geoParts) {
-            const entries = Object.entries(part.data.entries || {});
-            entries.forEach(([k,v]) => { geoDatabase[k] = v; });
-            if (typeof saveGeo === 'function') {
-                for (const [key, val] of entries) {
-                    await saveGeo(key, val);
-                }
+    // حفظ بيانات المواقع المدمجة من كل الأجزاء
+    if (Object.keys(mergedGeoEntries).length > 0 && typeof geoDatabase !== 'undefined') {
+        const entries = Object.entries(mergedGeoEntries);
+        entries.forEach(([k,v]) => { geoDatabase[k] = v; });
+        if (typeof saveGeo === 'function') {
+            for (const [key, val] of entries) {
+                await saveGeo(key, val);
             }
         }
     }
@@ -25232,7 +25279,16 @@ document.addEventListener('DOMContentLoaded', async function() {
                 AuthManager.applyRestrictions();
 
                 console.log('✅ تم تهيئة النظام بنجاح');
-                showNotification('تم تحميل النظام بنجاح', 'success');
+                // إن جرى ترحيل بيانات للتو، اعرض إشعاره بدلاً من رسالة التحميل العادية،
+                // ثم اعرض رسالة التحميل بعد 7 ثوانٍ حتى يقرأ المستخدم إشعار الترحيل كاملاً.
+                if (_pendingMigrationNotification) {
+                    const _mn = _pendingMigrationNotification;
+                    _pendingMigrationNotification = null;
+                    showNotification(_mn.msg, _mn.type);
+                    setTimeout(() => showNotification('تم تحميل النظام بنجاح', 'success'), 7000);
+                } else {
+                    showNotification('تم تحميل النظام بنجاح', 'success');
+                }
 
                 // فحص/تنفيذ النسخة الاحتياطية التلقائية الصامتة (لا تُعطّل الواجهة، تعمل في الخلفية)
                 if (typeof _runAutoSafetyBackupIfNeeded === 'function') {
