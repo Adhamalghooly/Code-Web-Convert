@@ -22,6 +22,11 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    // مطلوب مع @capacitor-community/sqlite لتفادي خطأ بناء معروف:
+    // "x files found with path 'build-data.properties'" (ملف مكرر يأتي من تبعية SQLCipher)
+    packagingOptions {
+        exclude 'build-data.properties'
+    }
 }
 
 repositories {

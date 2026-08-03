@@ -8,5 +8,10 @@
   "android": {
     "allowMixedContent": true,
     "webContentsDebuggingEnabled": true
+  },
+  "plugins": {
+    "CapacitorSQLite": {
+      "androidIsEncryption": false
+    }
   }
 }
