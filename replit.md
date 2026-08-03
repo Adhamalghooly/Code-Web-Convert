@@ -68,3 +68,36 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 ### Workflow Fix
 The workflow uses port 25074. The `restart_workflow` tool may fail because it checks via IPv6 (::1).
 Use `restartWorkflow({ workflowName: "artifacts/project-management: web" })` via code_execution instead.
+
+## APK Build (`apk-build/`)
+
+نسخة Capacitor 6 + SQLite من التطبيق كـAPK أندرويد.
+
+### المشكلة المحلولة
+- ملف `android/app/src/main/assets/capacitor.plugins.json` كان مفقوداً لأن `cap sync android` لم تُنفَّذ.
+- `@capacitor/cli` محظور بسبب تبعية `tar@6.2.1` (CVE).
+
+### كيفية بناء APK جديد
+```bash
+# 1. تأكد من Android SDK في:
+#    /home/runner/workspace/android-sdk  (يُنشأ مرة واحدة لكل بيئة)
+
+# 2. أنشئ ملفات cap sync يدوياً:
+mkdir -p apk-build/android/app/src/main/assets/public
+echo '[{"pkg":"@capacitor-community/sqlite","classpath":"com.getcapacitor.community.database.sqlite.CapacitorSQLitePlugin"}]' \
+  > apk-build/android/app/src/main/assets/capacitor.plugins.json
+cp apk-build/capacitor.config.json apk-build/android/app/src/main/assets/capacitor.config.json
+cp -r apk-build/www/. apk-build/android/app/src/main/assets/public/
+
+# 3. بناء الـAPK:
+export ANDROID_HOME=/home/runner/workspace/android-sdk
+cd apk-build/android && ./gradlew assembleDebug --no-daemon
+
+# 4. المخرج:
+# apk-build/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+### ملاحظات هامة
+- `@capacitor/cli` **محذوف** من devDependencies عمداً (CVE في tar@6.2.1).
+- `cordova.variables.gradle` يجب أن يكون موجوداً في `android/capacitor-cordova-android-plugins/`.
+- الـAPK المُسلَّم: `project-management-apk-sqlite.apk` في جذر المشروع.

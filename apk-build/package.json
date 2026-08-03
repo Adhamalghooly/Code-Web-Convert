@@ -4,14 +4,11 @@
   "description": "نظام تحليل بيانات المشاريع",
   "main": "index.js",
   "scripts": {
-    "build-android": "npx cap sync android && cd android && ./gradlew assembleDebug"
+    "build-android": "cd android && ./gradlew assembleDebug"
   },
   "dependencies": {
     "@capacitor/android": "^6.0.0",
     "@capacitor/core": "^6.0.0",
     "@capacitor-community/sqlite": "^6.0.0"
-  },
-  "devDependencies": {
-    "@capacitor/cli": "^6.0.0"
   }
 }
