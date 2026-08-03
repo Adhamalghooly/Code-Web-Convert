@@ -6,3 +6,10 @@ id = "_cInJQYLGokvHB8HU38NA"
 uri = "file://project-management-apk.zip"
 type = "unspecified"
 title = "project-management.apk — إصلاح الطباعة"
+
+[[outputs]]
+id = "Zyoij7EC0WSMUP6Hq_A2s"
+uri = "file://project-management-apk-sqlite.apk"
+type = "unspecified"
+title = "نظام تحليل بيانات المشاريع — SQLite (Debug)"
+description = "APK debug مبني بنجاح مع تكامل @capacitor-community/sqlite. حجم الملف: ~12MB"
