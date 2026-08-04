@@ -9801,10 +9801,12 @@ async function _migrateFromIndexedDBIfNeeded() {
     let migratedCount = 0;
     try {
         // 1) قاعدة المشاريع الرئيسية (metadata + timeline)
+        //    نستخدم saveToIndexedDB بدلاً من _sqliteRun المباشر لأنه يُقسّم الـtimeline
+        //    إلى أجزاء صغيرة، ما يمنع تجاوز حد IPC عند الترحيل من قاعدة بيانات كبيرة.
         const projectsRows = await _idbGetAllFromStore(legacyDb, DB_STORE_NAME);
         const mainRecord = projectsRows.find(r => r.value && r.value.id === 1) || projectsRows[0];
         if (mainRecord && mainRecord.value) {
-            await _sqliteRun("INSERT OR REPLACE INTO projects_store (id, data) VALUES (1, ?)", [JSON.stringify(mainRecord.value)]);
+            await saveToIndexedDB(mainRecord.value);
             migratedCount++;
         }
 
@@ -9874,12 +9876,38 @@ async function _migrateFromIndexedDBIfNeeded() {
     }
 }
 
+// ── ثابت حجم الجزء ──────────────────────────────────────────────────────────
+// جسر Capacitor IPC على Android محدود بـ~1MB لكل استدعاء.
+// نقسّم الـtimeline إلى أجزاء بحيث لا يتجاوز JSON كل جزء ~300KB أمناً.
+const _TL_CHUNK_SIZE = 80; // سجل/جزء (كل سجل ~1-5KB → جزء ~80-400KB)
+
 async function loadFromIndexedDB() {
     if (!sqliteReady) return null;
     try {
         const rows = await _sqliteQuery("SELECT data FROM projects_store WHERE id = 1");
         if (rows.length === 0 || rows[0].data == null) return null;
-        return JSON.parse(rows[0].data);
+        const stored = JSON.parse(rows[0].data);
+
+        // -- تحقق من التنسيق الجديد (timeline مقسّم في app_data) --
+        const countRow = await _sqliteQuery("SELECT value FROM app_data WHERE key = '_tl_chunk_count'");
+        if (countRow.length > 0 && countRow[0].value != null) {
+            // تنسيق جديد: timeline مخزّن على أجزاء منفصلة
+            const totalChunks = JSON.parse(countRow[0].value);
+            const timeline = [];
+            for (let i = 0; i < totalChunks; i++) {
+                const chunkRow = await _sqliteQuery(
+                    "SELECT value FROM app_data WHERE key = ?", [`_tl_chunk_${i}`]
+                );
+                if (chunkRow.length > 0 && chunkRow[0].value != null) {
+                    const chunk = JSON.parse(chunkRow[0].value);
+                    if (Array.isArray(chunk)) for (const r of chunk) timeline.push(r);
+                }
+            }
+            return { ...(stored.metadata ? stored : {}), metadata: stored.metadata || stored, timeline };
+        }
+
+        // -- تنسيق قديم: timeline داخل projects_store مباشرةً (توافق مع APKs السابقة) --
+        return stored;
     } catch (e) {
         console.error('loadFromIndexedDB (SQLite):', e);
         return null;
@@ -9888,7 +9916,35 @@ async function loadFromIndexedDB() {
 
 async function saveToIndexedDB(data) {
     if (!sqliteReady) throw new Error('قاعدة البيانات غير مهيأة');
-    await _sqliteRun("INSERT OR REPLACE INTO projects_store (id, data) VALUES (1, ?)", [JSON.stringify({ ...data, id: 1 })]);
+
+    // احفظ البيانات الوصفية فقط في projects_store (بدون timeline الضخم)
+    const metadata = (data && data.metadata) ? data.metadata : {};
+    await _sqliteRun(
+        "INSERT OR REPLACE INTO projects_store (id, data) VALUES (1, ?)",
+        [JSON.stringify({ id: 1, metadata })]
+    );
+
+    // احذف أجزاء الـtimeline القديمة
+    const oldCountRow = await _sqliteQuery("SELECT value FROM app_data WHERE key = '_tl_chunk_count'");
+    const oldCount = (oldCountRow.length > 0 && oldCountRow[0].value != null) ? JSON.parse(oldCountRow[0].value) : 0;
+    for (let i = 0; i < oldCount; i++) {
+        await _sqliteRun("DELETE FROM app_data WHERE key = ?", [`_tl_chunk_${i}`]);
+    }
+
+    // قسّم الـtimeline وخزّن كل جزء على حِدَة
+    const timeline = Array.isArray(data && data.timeline) ? data.timeline : [];
+    const totalChunks = Math.max(1, Math.ceil(timeline.length / _TL_CHUNK_SIZE));
+    for (let i = 0; i < totalChunks; i++) {
+        const chunk = timeline.slice(i * _TL_CHUNK_SIZE, (i + 1) * _TL_CHUNK_SIZE);
+        await _sqliteRun(
+            "INSERT OR REPLACE INTO app_data (key, value) VALUES (?, ?)",
+            [`_tl_chunk_${i}`, JSON.stringify(chunk)]
+        );
+    }
+    await _sqliteRun(
+        "INSERT OR REPLACE INTO app_data (key, value) VALUES (?, ?)",
+        ['_tl_chunk_count', JSON.stringify(totalChunks)]
+    );
 }
 
 async function saveAppData(key, value) {
