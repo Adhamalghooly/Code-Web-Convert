@@ -3892,6 +3892,20 @@ body {
                         <button class="btn btn-danger" id="clear-data">مسح جميع البيانات</button>
                     </div>
                 </div>
+
+                <!-- ════ لوحة تشخيص التخزين ════ -->
+                <div class="backup-section" id="storage-diag-section" style="margin-top:12px;">
+                    <h4>🔍 تشخيص التخزين</h4>
+                    <p style="color:var(--text-secondary);font-size:.85rem;margin-bottom:10px;">
+                        اضغط الزر للتحقق من نوع قاعدة البيانات المستخدمة وعدد السجلات المحفوظة.
+                    </p>
+                    <button class="btn" style="background:var(--primary);color:#fff;margin-bottom:10px;"
+                            onclick="runStorageDiagnostics()">🔍 فحص التخزين الآن</button>
+                    <div id="storage-diag-result"
+                         style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;
+                                padding:12px;font-size:.82rem;line-height:1.9;display:none;
+                                font-family:monospace;white-space:pre-wrap;word-break:break-all;"></div>
+                </div>
             </section>
 
             <section id="reports" class="section">
@@ -10637,6 +10651,110 @@ function showLoading() {
 function hideLoading() {
     const loading = document.getElementById('loading');
     if (loading) loading.classList.remove('show');
+}
+
+// ════ تشخيص التخزين — يُظهر نوع قاعدة البيانات وعدد السجلات ════
+async function runStorageDiagnostics() {
+    const box = document.getElementById('storage-diag-result');
+    if (!box) return;
+    box.style.display = 'block';
+    box.textContent = '⏳ جاري الفحص...';
+
+    const lines = [];
+
+    // 1) فحص إضافة SQLite
+    const cap = window.Capacitor;
+    const plugin = cap && cap.Plugins && cap.Plugins.CapacitorSQLite;
+    lines.push('── إضافة CapacitorSQLite ──');
+    lines.push(plugin ? '✅ الإضافة مسجَّلة (CapacitorSQLite موجود)' : '❌ الإضافة غير موجودة — قاعدة البيانات ستكون في IndexedDB فقط');
+
+    // 2) حالة الاتصال
+    lines.push('');
+    lines.push('── حالة الاتصال ──');
+    lines.push(`sqliteReady : ${sqliteReady ? '✅ true' : '❌ false'}`);
+    lines.push(`indexedDB   : ${indexedDB  ? '✅ truthy (يعني SQLite جاهز)' : '❌ null/false'}`);
+
+    // 3) عدد السجلات في SQLite
+    lines.push('');
+    lines.push('── السجلات في SQLite ──');
+    if (sqliteReady) {
+        try {
+            const tlCount = await _sqliteQuery("SELECT value FROM app_data WHERE key='_tl_chunk_count'");
+            const chunks   = tlCount.length ? JSON.parse(tlCount[0].value) : 0;
+            let total = 0;
+            for (let i = 0; i < chunks; i++) {
+                const c = await _sqliteQuery("SELECT value FROM app_data WHERE key=?", [`_tl_chunk_${i}`]);
+                if (c.length && c[0].value) {
+                    const arr = JSON.parse(c[0].value);
+                    if (Array.isArray(arr)) total += arr.length;
+                }
+            }
+            lines.push(`timeline → ${chunks} جزء → ${total} سجل زمني`);
+
+            const proj = await _sqliteQuery("SELECT data FROM projects_store WHERE id=1");
+            if (proj.length) {
+                const meta = JSON.parse(proj[0].data);
+                lines.push(`projects_store → بيانات وصفية محفوظة ✅`);
+                lines.push(`  آخر تحديث: ${(meta.metadata && meta.metadata.lastUpdate) || '—'}`);
+            } else {
+                lines.push(`projects_store → فارغ ❌`);
+            }
+
+            const migrated = await _sqliteQuery("SELECT value FROM app_data WHERE key='_migratedFromIndexedDB_v1'");
+            if (migrated.length) {
+                const minfo = JSON.parse(migrated[0].value);
+                lines.push(`الترحيل من IndexedDB: ✅ تم  (${minfo.fresh ? 'تثبيت جديد' : (minfo.recordsMigrated || '?') + ' سجل'})`);
+                lines.push(`  في: ${minfo.at || '—'}`);
+            } else {
+                lines.push(`الترحيل من IndexedDB: ⏳ لم يُنفَّذ بعد (سيجري عند إعادة التشغيل)`);
+            }
+
+            const appRows = await _sqliteQuery("SELECT count(*) as n FROM app_data");
+            lines.push(`app_data → ${appRows[0] && appRows[0].n} مفتاح محفوظ`);
+
+        } catch (err) {
+            lines.push(`❌ خطأ في قراءة SQLite: ${err && err.message}`);
+        }
+    } else {
+        lines.push('SQLite غير جاهز — لا يمكن قراءة السجلات');
+    }
+
+    // 4) IndexedDB القديم
+    lines.push('');
+    lines.push('── IndexedDB (قاعدة بيانات المتصفح القديمة) ──');
+    try {
+        await new Promise((resolve) => {
+            const req = window.indexedDB.open('ProjectsAnalysisDB', 5);
+            req.onsuccess = async () => {
+                const db = req.result;
+                const stores = Array.from(db.objectStoreNames);
+                lines.push(`المخازن الموجودة: ${stores.join(', ') || 'لا شيء'}`);
+                if (stores.includes('projects')) {
+                    const tx = db.transaction(['projects'], 'readonly');
+                    const store = tx.objectStore('projects');
+                    const cnt = store.count();
+                    cnt.onsuccess = () => {
+                        lines.push(`projects → ${cnt.result} سجل`);
+                        db.close();
+                        resolve();
+                    };
+                    cnt.onerror = () => { db.close(); resolve(); };
+                } else {
+                    lines.push('لا توجد بيانات قديمة (أو التطبيق يستخدم SQLite فقط)');
+                    db.close();
+                    resolve();
+                }
+            };
+            req.onerror = () => { lines.push('تعذّر فتح IndexedDB'); resolve(); };
+            req.onupgradeneeded = () => { lines.push('IndexedDB غير موجود (تثبيت جديد)'); };
+        });
+    } catch(e) {
+        lines.push(`خطأ: ${e && e.message}`);
+    }
+
+    lines.push('');
+    lines.push(`── الوقت: ${new Date().toLocaleTimeString('ar')} ──`);
+    box.textContent = lines.join('\n');
 }
 
 function showModal(content) {
@@ -26726,13 +26844,26 @@ function initBackupHandlers() {
             const files = Array.from(e.target.files || []);
             if (files.length > 0) {
                 showLoading();
+                showNotification(`⏳ جاري قراءة ${files.length} ملف...`, 'info');
                 try {
+                    // تحقق من SQLite قبل الاستيراد
+                    if (!sqliteReady) {
+                        throw new Error('قاعدة البيانات غير مهيأة — أغلق التطبيق وأعد فتحه ثم حاول مجدداً');
+                    }
+                    showNotification(`⏳ جاري معالجة الملفات (${files.length} ملف)...`, 'info');
                     await importBackupFiles(files);
+                    showNotification(`⏳ جاري حفظ البيانات في SQLite...`, 'info');
                     updateUI();
-                    showNotification(`تم استيراد النسخة الاحتياطية بنجاح (${files.length} ملف)`, 'success');
+                    showNotification(`✅ تم الاستيراد بنجاح (${files.length} ملف) وحفظ البيانات في SQLite`, 'success');
                 } catch (error) {
                     console.error('فشل الاستيراد:', error);
-                    showNotification('فشل في استيراد النسخة الاحتياطية: ' + (error && error.message ? error.message : ''), 'error');
+                    const msg = (error && error.message) ? error.message : String(error);
+                    showNotification('❌ فشل الاستيراد: ' + msg, 'error');
+                    // اعرض التفاصيل في لوحة التشخيص إن كانت مفتوحة
+                    const box = document.getElementById('storage-diag-result');
+                    if (box && box.style.display !== 'none') {
+                        box.textContent = '❌ خطأ أثناء الاستيراد:\n' + msg + '\n\nاضغط "فحص التخزين الآن" لمزيد من التفاصيل.';
+                    }
                 } finally {
                     hideLoading();
                     backupFile.value = '';
